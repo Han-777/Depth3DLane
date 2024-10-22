@@ -75,7 +75,7 @@ def train_dataset():
                     A.Normalize(),
                     ToTensorV2()
                     ])
-    train_data = OpenLane_dataset_with_offset(train_image_paths, depth_image_paths, train_gt_paths, 
+    train_data = OpenLane_dataset_with_offset(train_image_paths, train_gt_paths, 
                                               x_range, y_range, meter_per_pixel, 
                                               train_trans, output_2d_shape, vc_config)
 
@@ -87,7 +87,7 @@ def val_dataset():
         A.Resize(height=input_shape[0], width=input_shape[1]),
         A.Normalize(),
         ToTensorV2()])
-    val_data = OpenLane_dataset_with_offset_val(val_image_paths, depth_val_image_path, val_gt_paths,
+    val_data = OpenLane_dataset_with_offset_val(val_image_paths, val_gt_paths,
                                                 trans_image,vc_config)
     return val_data
 

@@ -1,8 +1,100 @@
 import torch
 import torchvision as tv
-import torch.nn.functional as F
 from torch import nn
+from .dpt import DepthAnythingV2, _make_fusion_block, _make_scratch
+import torch.nn.functional as F
 
+class DepthHead(nn.Module):
+    def __init__(
+        self, 
+        in_channels, 
+        features=256, 
+        use_bn=False, 
+        out_channels=[256, 512, 1024, 1024], 
+        use_clstoken=False
+    ):
+        super(DepthHead, self).__init__()
+        
+        self.use_clstoken = use_clstoken
+        
+        self.projects = nn.ModuleList([
+            nn.Conv2d(
+                in_channels=in_channels,
+                out_channels=out_channel,
+                kernel_size=1,
+                stride=1,
+                padding=0,
+            ) for out_channel in out_channels
+        ])
+        
+        self.resize_layers = nn.ModuleList([
+            nn.Upsample(scale_factor=8, mode='bilinear', align_corners=True),
+            nn.Upsample(scale_factor=4, mode='bilinear', align_corners=True),
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
+            nn.Identity()
+        ])
+        
+        if use_clstoken:
+            self.readout_projects = nn.ModuleList()
+            for _ in range(len(self.projects)):
+                self.readout_projects.append(
+                    nn.Sequential(
+                        nn.Linear(2 * in_channels, in_channels),
+                        nn.GELU()))
+        
+        self.scratch = _make_scratch(
+            out_channels,
+            features,
+            groups=1,
+            expand=False,
+        )
+        
+        self.scratch.stem_transpose = None
+        
+        self.scratch.refinenet1 = _make_fusion_block(features, use_bn)
+        self.scratch.refinenet2 = _make_fusion_block(features, use_bn)
+        self.scratch.refinenet3 = _make_fusion_block(features, use_bn)
+        self.scratch.refinenet4 = _make_fusion_block(features, use_bn)
+        
+        head_features_1 = features
+        head_features_2 = 32
+        
+        self.scratch.output_conv1 = nn.Conv2d(head_features_1, head_features_1 // 2, kernel_size=3, stride=1, padding=1)
+        self.scratch.output_conv2 = nn.Sequential(
+            nn.Conv2d(head_features_1 // 2, head_features_2, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(True),
+            nn.Conv2d(head_features_2, 1, kernel_size=1, stride=1, padding=0),
+            nn.ReLU(True),
+            nn.Identity(),
+        )
+    
+    def forward(self, out_features, patch_h, patch_w):
+        out = []
+        for i, x in enumerate(out_features):
+            # 修改此处，不再处理 ViT 的 cls_token
+            x = x  # x 已经是 CNN 的特征图
+
+            x = self.projects[i](x)
+            x = self.resize_layers[i](x)
+            out.append(x)
+        
+        layer_1, layer_2, layer_3, layer_4 = out
+        
+        layer_1_rn = self.scratch.layer1_rn(layer_1)
+        layer_2_rn = self.scratch.layer2_rn(layer_2)
+        layer_3_rn = self.scratch.layer3_rn(layer_3)
+        layer_4_rn = self.scratch.layer4_rn(layer_4)
+        
+        path_4 = self.scratch.refinenet4(layer_4_rn, size=layer_3_rn.shape[2:])        
+        path_3 = self.scratch.refinenet3(path_4, layer_3_rn, size=layer_2_rn.shape[2:])
+        path_2 = self.scratch.refinenet2(path_3, layer_2_rn, size=layer_1_rn.shape[2:])
+        path_1 = self.scratch.refinenet1(path_2, layer_1_rn)
+        
+        out = self.scratch.output_conv1(path_1)
+        out = F.interpolate(out, (int(patch_h * 14), int(patch_w * 14)), mode="bilinear", align_corners=True)
+        out = self.scratch.output_conv2(out)
+        
+        return out
 
 def naive_init_module(mod):
     for m in mod.modules():
@@ -12,56 +104,6 @@ def naive_init_module(mod):
             nn.init.constant_(m.weight, 1)
             nn.init.constant_(m.bias, 0)
     return mod
-
-
-class ResNet34_Backbone(nn.Module):
-    def __init__(self, pretrained=True):
-        super(ResNet34_Backbone, self).__init__()
-        resnet = tv.models.resnet34(pretrained=pretrained)
-
-        # Initial layers
-        self.conv1 = resnet.conv1  # (B, 64, H/2, W/2)
-        self.bn1 = resnet.bn1
-        self.relu = resnet.relu
-        self.maxpool = resnet.maxpool  # (B, 64, H/4, W/4)
-
-        # ResNet layers
-        self.layer1 = resnet.layer1  # (B, 64, H/4, W/4)
-        self.layer2 = resnet.layer2  # (B, 128, H/8, W/8)
-        self.layer3 = resnet.layer3  # (B, 256, H/16, W/16)
-        self.layer4 = resnet.layer4  # (B, 512, H/32, W/32)
-
-        # Initialize weights
-        for m in self.modules():
-            naive_init_module(m)
-
-    def forward(self, x):
-        skips = []
-
-        x = self.conv1(x)
-        x = self.bn1(x)
-        x = self.relu(x)
-        x = self.maxpool(x)
-        # skips[0]: After maxpool (B, 64, H/4, W/4)
-        skips.append(x)
-
-        x = self.layer1(x)
-        # skips[1]: After layer1 (B, 64, H/4, W/4)
-        skips.append(x)
-
-        x = self.layer2(x)
-        # skips[2]: After layer2 (B, 128, H/8, W/8)
-        skips.append(x)
-
-        x = self.layer3(x)
-        # skips[3]: After layer3 (B, 256, H/16, W/16)
-        skips.append(x)
-
-        x = self.layer4(x)
-        # skips[4]: After layer4 (B, 512, H/32, W/32)
-        skips.append(x)
-
-        return skips  # List of feature maps from different stages
 
 
 class InstanceEmbedding_offset_y_z(nn.Module):
@@ -186,84 +228,6 @@ class InstanceEmbedding(nn.Module):
     def forward(self, x):
         feat = self.neck(x)
         return self.ms(feat), self.me(feat)
-
-
-class DepthHeadUNet(nn.Module):
-    def __init__(self, in_channels=512, out_channels=1, base_channels=256):
-        super(DepthHeadUNet, self).__init__()
-
-        # Decoder layers
-        self.up1 = self.up_block(in_channels, base_channels)  # From layer4 to layer3
-        self.conv1 = self.conv_block(base_channels * 2, base_channels)
-
-        self.up2 = self.up_block(base_channels, base_channels // 2)  # From layer3 to layer2
-        self.conv2 = self.conv_block(base_channels, base_channels // 2)
-
-        self.up3 = self.up_block(base_channels // 2, base_channels // 4)  # From layer2 to layer1
-        self.conv3 = self.conv_block(base_channels // 2, base_channels // 4)
-
-        self.up4 = self.up_block(base_channels // 4, base_channels // 8)  # From layer1 to after maxpool
-        self.conv4 = self.conv_block(base_channels // 8 + 64, base_channels // 8)  # +64 channels from after maxpool
-
-        # Final upsampling to reach (576, 1024)
-        self.final_up = nn.Upsample(scale_factor=2, mode='bilinear',
-                                    align_corners=True)  # From (B, 32, 288, 512) to (B, 32, 576, 1024)
-        self.final_conv = nn.Conv2d(base_channels // 8, out_channels, kernel_size=1)
-        naive_init_module(self.final_conv)
-
-    def up_block(self, in_channels, out_channels):
-        return nn.Sequential(
-            nn.Upsample(scale_factor=2, mode='nearest'),
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True)
-        )
-
-    def conv_block(self, in_channels, out_channels):
-        return nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True)
-        )
-
-    def forward(self, x, skips):
-        """
-        x: Input feature map from backbone (B, 512, H/32, W/32)
-        skips: List of feature maps from backbone for skip connections
-               [after maxpool, layer1, layer2, layer3, layer4]
-        """
-        # Decoder step 1: Upsample layer4 to layer3's spatial size
-        d1 = self.up1(x)  # (B, 256, H/16, W/16)
-        s1 = skips[3]  # Corresponding skip from layer3 (B, 256, H/16, W/16)
-        d1 = torch.cat([d1, s1], dim=1)  # (B, 512, H/16, W/16)
-        d1 = self.conv1(d1)  # (B, 256, H/16, W/16)
-
-        # Decoder step 2: Upsample to layer2's spatial size
-        d2 = self.up2(d1)  # (B, 128, H/8, W/8)
-        s2 = skips[2]  # Corresponding skip from layer2 (B, 128, H/8, W/8)
-        d2 = torch.cat([d2, s2], dim=1)  # (B, 256, H/8, W/8)
-        d2 = self.conv2(d2)  # (B, 128, H/8, W/8)
-
-        # Decoder step 3: Upsample to layer1's spatial size
-        d3 = self.up3(d2)  # (B, 64, H/4, W/4)
-        s3 = skips[1]  # Corresponding skip from layer1 (B, 64, H/4, W/4)
-        d3 = torch.cat([d3, s3], dim=1)  # (B, 128, H/4, W/4)
-        d3 = self.conv3(d3)  # (B, 64, H/4, W/4)
-
-        # Decoder step 4: Upsample to after maxpool's spatial size
-        d4 = self.up4(d3)  # (B, 32, H/2, W/2)
-        s4 = skips[0]  # Corresponding skip from after maxpool (B, 64, H/4, W/4)
-        # To match spatial dimensions, upsample s4
-        s4 = F.interpolate(s4, size=d4.shape[2:], mode='bilinear', align_corners=True)
-        d4 = torch.cat([d4, s4], dim=1)  # (B, 96, H/2, W/2)
-        d4 = self.conv4(d4)  # (B, 32, H/2, W/2)
-
-        # Final upsampling
-        out = self.final_up(d4)  # (B, 32, H, W)
-        out = self.final_conv(out)  # (B, 1, H, W)
-        depth_map = torch.sigmoid(out)  # Normalize to [0, 1]
-
-        return depth_map
 
 
 class LaneHeadResidual_Instance_with_offset_z(nn.Module):
@@ -414,14 +378,12 @@ class Residual(nn.Module):
 # 两个全连接变换层 (self.s32transformer 和 self.s64transformer)，将 ResNet 骨干网络的特征图转换为 BEV 表示。
 # 车道线检测头 (self.lane_head)，以 BEV 表示作为输入，输出表示检测到的车道线的张量。
 # 可选的 2D 图像车道线检测头 (self.lane_head_2d)，以 ResNet 骨干网络的输出作为输入，输出表示原始图像中检测到的车道线的张量。
-class BEV_LaneDet(nn.Module):
+class BEV_LaneDet(nn.Module):  # BEV-LaneDet
     def __init__(self, bev_shape, output_2d_shape, train=True):
         super(BEV_LaneDet, self).__init__()
-
-        # Custom ResNet34 Backbone with Skip Connections
-        self.backbone = ResNet34_Backbone(pretrained=True)
-
-        # Spatial Transformers to BEV
+        self.bb = nn.Sequential(*list(tv.models.resnet34(pretrained=True).children())[:-2])
+        self.bb[0] = nn.Conv2d(4, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        
         self.down = naive_init_module(
             Residual(
                 module=nn.Sequential(
@@ -434,39 +396,46 @@ class BEV_LaneDet(nn.Module):
                 downsample=nn.Conv2d(512, 1024, kernel_size=3, stride=2, padding=1),
             )
         )
-
+        self.depth_head = DepthHead(
+            in_channels=512,  # BEV 特征图的通道数
+            features=256,
+            use_bn=False,
+            out_channels=[256, 256, 256, 256],  # 可以根据需要调整
+            use_clstoken=False
+        )
         self.s32transformer = FCTransform_((512, 18, 32), (256, 25, 5))
-        self.s64transformer = FCTransform_((1024, 9, 16), (256, 25, 5))
+        self.s64transformer = FCTransform_((1024, 9, 16), (256, 25, 5))  
         self.lane_head = LaneHeadResidual_Instance_with_offset_z(bev_shape, input_channel=512)
-
-        # Depth Head with Skip Connections
-        self.depth_head = DepthHeadUNet(in_channels=512, out_channels=1, base_channels=256)
-
         self.is_train = train
         if self.is_train:
             self.lane_head_2d = LaneHeadResidual_Instance(output_2d_shape, input_channel=512)
 
     def forward(self, img):
-        # Backbone feature extraction with skip connections
-        skips = self.backbone(img)  # List of feature maps [After maxpool, layer1, layer2, layer3, layer4]
+        img_s32 = self.bb(img)
+        img_s64 = self.down(img_s32)
+        bev_32 = self.s32transformer(img_s32)
+        bev_64 = self.s64transformer(img_s64)
+        bev = torch.cat([bev_64, bev_32], dim=1)  # bev 形状: (batch_size, 512, 25, 5)
 
-        img_s32 = skips[-1]  # layer4 output: (B, 512, 18, 32)
-        img_s64 = self.down(img_s32)  # (B, 1024, 9, 16)
+        # 准备传递给 DepthHead 的特征图列表
+        # 这里，我们可以对 bev 进行不同尺度的下采样，生成四个特征图
+        bev_features = [
+            F.interpolate(bev, scale_factor=1/8, mode='bilinear', align_corners=True),
+            F.interpolate(bev, scale_factor=1/4, mode='bilinear', align_corners=True),
+            F.interpolate(bev, scale_factor=1/2, mode='bilinear', align_corners=True),
+            bev  # 原始尺寸
+        ]
 
-        # Spatial transformers to BEV
-        bev_32 = self.s32transformer(img_s32)  # (B, 256, 25, 5)
-        bev_64 = self.s64transformer(img_s64)  # (B, 256, 25, 5)
-        bev = torch.cat([bev_64, bev_32], dim=1)  # (B, 512, 25, 5)
+        # DepthHead 需要 patch 的高度和宽度
+        patch_h = bev_features[0].shape[2]
+        patch_w = bev_features[0].shape[3]
 
-        # Lane head predictions
-        lane_outputs = self.lane_head(bev)  # (ms_new, me_new, m_offset_new, m_z)
-
-        # Depth prediction with skip connections
-        depth_map = self.depth_head(img_s32, skips)  # (B, 1, 576, 1024)
+        # 获取深度预测
+        depth_pred = self.depth_head(bev_features, patch_h, patch_w)
 
         if self.is_train:
-            lane_2d_outputs = self.lane_head_2d(img_s32)  # (ms, me)
-            return lane_outputs, lane_2d_outputs, depth_map
+            lane_output = self.lane_head(bev)
+            lane_output_2d = self.lane_head_2d(img_s32)
+            return lane_output, lane_output_2d, img_s32, img_s64, depth_pred
         else:
-            return lane_outputs
-
+            return self.lane_head(bev), depth_pred

@@ -1,5 +1,5 @@
 import sys
-sys.path.append('/media/bluewolf/Data/bluewolf/projs/depth_label/Depth3DLane')
+sys.path.append('/media/bluewolf/Data/bluewolf/projs/Depth3DLane')
 import torch
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
@@ -10,91 +10,8 @@ from models.loss import IoULoss, NDPushPullLoss
 from utils.config_util import load_config_module
 from sklearn.metrics import f1_score
 import numpy as np
-import pytorch_ssim
-import os
-
-os.chdir("/media/bluewolf/Data/bluewolf/projs/depth_label/Depth3DLane/tools")
-
-class GradientLoss(nn.Module):
-    """
-    Computes the gradient loss between two depth maps.
-    """
-    def __init__(self):
-        super(GradientLoss, self).__init__()
-        # Define Sobel kernels for gradient computation
-        self.grad_x = nn.Conv2d(1, 1, kernel_size=3, padding=1, bias=False)
-        self.grad_y = nn.Conv2d(1, 1, kernel_size=3, padding=1, bias=False)
-
-        # Initialize Sobel kernels
-        sobel_x = torch.tensor([[[[-1, 0, 1],
-                                  [-2, 0, 2],
-                                  [-1, 0, 1]]]], dtype=torch.float32)
-        sobel_y = torch.tensor([[[[-1, -2, -1],
-                                  [0, 0, 0],
-                                  [1, 2, 1]]]], dtype=torch.float32)
-
-        # Assign Sobel kernels to convolution layers
-        self.grad_x.weight = nn.Parameter(sobel_x, requires_grad=False)
-        self.grad_y.weight = nn.Parameter(sobel_y, requires_grad=False)
-
-        # Define L1 loss for gradients
-        self.l1 = nn.L1Loss()
-
-    def forward(self, pred, target):
-        # Compute gradients for predictions and targets
-        pred_grad_x = self.grad_x(pred)
-        pred_grad_y = self.grad_y(pred)
-        target_grad_x = self.grad_x(target)
-        target_grad_y = self.grad_y(target)
-
-        # Compute L1 loss between gradients
-        loss_x = self.l1(pred_grad_x, target_grad_x)
-        loss_y = self.l1(pred_grad_y, target_grad_y)
-
-        return loss_x + loss_y
-
-
-class CombinedDepthLoss(nn.Module):
-    def __init__(self, alpha=0.5, beta=0.3, gamma=0.2): # 这里的可以根据效果修改，三种损失函数的比例
-        """
-        Initializes the CombinedDepthLoss.
-
-        Parameters:
-        - alpha (float): Weight for L1 loss.
-        - beta (float): Weight for SSIM loss.
-        - gamma (float): Weight for Gradient loss.
-        """
-        super(CombinedDepthLoss, self).__init__()
-        self.alpha = alpha
-        self.beta = beta
-        self.gamma = gamma
-        self.l1_loss = nn.L1Loss()
-        self.ssim_loss = pytorch_ssim.SSIM(window_size=11, size_average=True)
-        self.gradient_loss = GradientLoss()
-
-    def forward(self, pred, target):
-        """
-        Computes the combined depth loss.
-
-        Parameters:
-        - pred (torch.Tensor): Predicted depth map (B, 1, H, W).
-        - target (torch.Tensor): Ground truth depth map (B, 1, H, W).
-
-        Returns:
-        - torch.Tensor: Combined depth loss.
-        """
-        # Ensure the depth maps are in the same range
-        pred = torch.sigmoid(pred)  # Normalize to [0, 1] if not already
-
-        # Compute individual loss components
-        loss_l1 = self.l1_loss(pred, target)
-        loss_ssim = 1 - self.ssim_loss(pred, target)
-        loss_grad = self.gradient_loss(pred, target)
-
-        # Combine losses with respective weights
-        combined_loss = self.alpha * loss_l1 + self.beta * loss_ssim + self.gamma * loss_grad
-        return combined_loss
-
+import torch.nn.functional as F
+from models.model.dpt import DepthAnythingV2
 
 class Combine_Model_and_Loss(torch.nn.Module):
     def __init__(self, model):
@@ -105,152 +22,116 @@ class Combine_Model_and_Loss(torch.nn.Module):
         self.poopoo = NDPushPullLoss(1.0, 1., 1.0, 5.0, 200)
         self.mse_loss = nn.MSELoss()
         self.bce_loss = nn.BCELoss()
-
-        # Initialize the combined depth loss
-        self.combined_depth_loss = CombinedDepthLoss(alpha=0.5, beta=0.3, gamma=0.2)
+        # self.sigmoid = nn.Sigmoid()
 
     def forward(self, inputs, gt_seg=None, gt_instance=None, gt_offset_y=None, gt_z=None, image_gt_segment=None,
-                image_gt_instance=None, depth_gt_map=None, train=True):
-        """
-        Forward pass that computes predictions and losses.
-
-        Parameters:
-        - inputs (torch.Tensor): Input images (B, 3, H, W).
-        - gt_seg (torch.Tensor): Ground truth segmentation maps.
-        - gt_instance (torch.Tensor): Ground truth instance maps.
-        - gt_offset_y (torch.Tensor): Ground truth offset maps.
-        - gt_z (torch.Tensor): Ground truth height maps.
-        - image_gt_segment (torch.Tensor): Ground truth 2D segmentation maps.
-        - image_gt_instance (torch.Tensor): Ground truth 2D instance maps.
-        - depth_gt_map (torch.Tensor): Ground truth depth maps.
-        - train (bool): Flag indicating training mode.
-
-        Returns:
-        - If train=True:
-            - pred (torch.Tensor): Predicted segmentation maps.
-            - loss_total (torch.Tensor): Combined BEV and 2D loss.
-            - loss_total_2d (torch.Tensor): Combined 2D loss.
-            - loss_offset (torch.Tensor): Offset loss.
-            - loss_z (torch.Tensor): Height loss.
-            - loss_depth (torch.Tensor): Depth loss.
-        - Else:
-            - pred (torch.Tensor): Predicted segmentation maps.
-        """
-        # Forward pass through the model
-        res = self.model(inputs)
-        lane_outputs, lane_2d_outputs, depth_map = res  # Unpack model outputs
-        pred, emb, offset_y, z = lane_outputs
-        pred_2d, emb_2d = lane_2d_outputs
+                image_gt_instance=None, train=True):
+        # 完整传递所有参数给模型
+        res = self.model(inputs, gt_seg, gt_instance, gt_offset_y, gt_z, image_gt_segment, image_gt_instance)
+        # 假设模型的输出顺序为：
+        # res = (lane_output, lane_output_2d, img_s32, img_s64, depth_pred, z_pred)
+        # 根据您的 BEV_LaneDet 的定义，请确保正确解析
+        lane_output, lane_output_2d, img_s32, img_s64, depth_pred = res  # 根据模型实际输出调整
 
         if train:
-            ## 3D Losses
-            # Segmentation Loss
-            loss_seg = self.bce(pred, gt_seg) + self.iou_loss(torch.sigmoid(pred), gt_seg)
-
-            # Embedding Loss
-            loss_emb = self.poopoo(emb, gt_instance)
-
-            # Offset Loss
+            # 3D 损失
+            loss_seg = self.bce(lane_output, gt_seg) + self.iou_loss(torch.sigmoid(lane_output), gt_seg)
+            loss_emb = self.poopoo(emb, gt_instance)  # 确保 'emb' 已定义
             loss_offset = self.bce_loss(gt_seg * torch.sigmoid(offset_y), gt_offset_y)
+            loss_z = self.mse_loss(z_pred, gt_z)  # 使用 MSELoss 计算 z 预测损失
 
-            # Height Loss
-            loss_z = self.mse_loss(gt_seg * z, gt_z)
-
-            # Combined BEV Loss
             loss_total = 3 * loss_seg + 0.5 * loss_emb
             loss_total = loss_total.unsqueeze(0)
             loss_offset = 60 * loss_offset.unsqueeze(0)
             loss_z = 30 * loss_z.unsqueeze(0)
 
-            ## 2D Losses
-            # 2D Segmentation Loss
-            loss_seg_2d = self.bce(pred_2d, image_gt_segment) + self.iou_loss(torch.sigmoid(pred_2d), image_gt_segment)
-
-            # 2D Embedding Loss
-            loss_emb_2d = self.poopoo(emb_2d, image_gt_instance)
-
-            # Combined 2D Loss
+            # 2D 损失
+            loss_seg_2d = self.bce(lane_output_2d, image_gt_segment) + self.iou_loss(torch.sigmoid(lane_output_2d), image_gt_segment)
+            loss_emb_2d = self.poopoo(emb_2d, image_gt_instance)  # 确保 'emb_2d' 已定义
             loss_total_2d = 3 * loss_seg_2d + 0.5 * loss_emb_2d
             loss_total_2d = loss_total_2d.unsqueeze(0)
 
-            ## Depth Loss
-            loss_depth = self.combined_depth_loss(depth_map, depth_gt_map)
-            loss_depth = loss_depth.unsqueeze(0)
-
-            ## Total Combined Loss
-            # Adjust weights as necessary
-            loss_total_combined = loss_total + 0.5 * loss_total_2d + loss_offset + loss_z + loss_depth
-
-            return pred, loss_total_combined, loss_total_2d, loss_offset, loss_z, loss_depth
+            return lane_output, loss_total, loss_total_2d, loss_offset, loss_z, depth_pred
         else:
-            return pred
+            return lane_output, depth_pred
 
 
-def train_epoch(model, dataloader, optimizer, configs, epoch):
+def initialize_teacher_model(device):
+    teacher_model = DepthAnythingV2(
+        encoder='vitl',
+        features=256,
+        out_channels=[256,512,1024,1024],
+        use_bn=False,
+        use_clstoken=False
+    )
+    teacher_model.to(device)
+    teacher_model.eval()
+    for param in teacher_model.parameters():
+        param.requires_grad = False
+    return teacher_model
+
+def train_epoch(model, dataset, optimizer, configs, epoch, teacher_model, device, lambda_distill=0.5):
     """
-    Trains the model for one epoch.
+    修改后的训练循环，包含蒸馏损失。
 
-    Parameters:
-    - model (torch.nn.Module): Combined model and loss.
-    - dataloader (DataLoader): DataLoader for training data.
-    - optimizer (torch.optim.Optimizer): Optimizer for training.
-    - configs: Configuration module containing training parameters.
-    - epoch (int): Current epoch number.
+    参数:
+    - model: Combine_Model_and_Loss 包装后的 BEV_LaneDet 模型
+    - dataset: 训练数据集
+    - optimizer: 优化器
+    - configs: 配置参数
+    - epoch: 当前轮数
+    - teacher_model: DPT 教师模型
+    - device: 计算设备
+    - lambda_distill: 蒸馏损失的权重
     """
     model.train()
+    teacher_model.eval()  # 确保教师模型在评估模式
     losses_avg = {}
-    for idx, (
-            input_data, gt_seg_data, gt_emb_data, offset_y_data, z_data, image_gt_segment, image_gt_instance,
-            depth_gt_map
-    ) in enumerate(dataloader):
-        # Move data to GPU
-        input_data = input_data.cuda()
-        gt_seg_data = gt_seg_data.cuda()
-        gt_emb_data = gt_emb_data.cuda()
-        offset_y_data = offset_y_data.cuda()
-        z_data = z_data.cuda()
-        image_gt_segment = image_gt_segment.cuda()
-        image_gt_instance = image_gt_instance.cuda()
-        depth_gt_map = depth_gt_map.cuda()
+    '''image,image_gt_segment,image_gt_instance,ipm_gt_segment,ipm_gt_instance'''
 
-        # Forward pass
-        outputs = model(
-            input_data,
-            gt_seg=gt_seg_data,
-            gt_instance=gt_emb_data,
-            gt_offset_y=offset_y_data,
-            gt_z=z_data,
-            image_gt_segment=image_gt_segment,
-            image_gt_instance=image_gt_instance,
-            depth_gt_map=depth_gt_map,
-            train=True
+    for idx, (
+        input_data, gt_seg_data, gt_emb_data, offset_y_data, z_data, image_gt_segment, image_gt_instance
+    ) in enumerate(dataset):
+        # 将数据迁移到设备
+        input_data = input_data.to(device)
+        gt_seg_data = gt_seg_data.to(device)
+        gt_emb_data = gt_emb_data.to(device)
+        offset_y_data = offset_y_data.to(device)
+        z_data = z_data.to(device)
+        image_gt_segment = image_gt_segment.to(device)
+        image_gt_instance = image_gt_instance.to(device)
+
+        # 前向传播：获取 BEV_LaneDet 的输出，包括深度预测
+        prediction, loss_total_bev, loss_total_2d, loss_offset, loss_z, depth_pred = model(
+            input_data, gt_seg_data, gt_emb_data, offset_y_data, z_data,
+            image_gt_segment, image_gt_instance, train=True
         )
 
-        if len(outputs) == 6:
-            prediction, loss_total_combined, loss_total_2d, loss_offset, loss_z, loss_depth = outputs
-        else:
-            raise ValueError("Expected 6 outputs from the model during training.")
+        # 计算总损失（不包括蒸馏损失）
+        loss_back_total = loss_total_bev.mean() + 0.5 * loss_total_2d.mean() + loss_offset.mean() + loss_z.mean()
 
-        # Compute mean losses
-        loss_back_combined = loss_total_combined.mean()
-        loss_back_2d = loss_total_2d.mean()
-        loss_offset = loss_offset.mean()
-        loss_z = loss_z.mean()
-        loss_depth = loss_depth.mean()
+        # 获取教师模型的深度预测（无需计算梯度）
+        with torch.no_grad():
+            depth_teacher, _ = teacher_model(input_data)
+            depth_teacher = depth_teacher.to(device)
 
-        # Total loss
-        # Adjust weights as necessary; currently already weighted in Combine_Model_and_Loss
-        loss_back_total = loss_back_combined + 0.5 * loss_back_2d + loss_offset + loss_z + loss_depth
+        # 计算蒸馏损失（例如，均方误差损失）
+        distillation_loss = F.mse_loss(depth_pred, depth_teacher)
 
-        # Backward pass and optimization
+        # 组合总损失
+        total_loss = loss_back_total + lambda_distill * distillation_loss
+
+        # 反向传播和优化
         optimizer.zero_grad()
-        loss_back_total.backward()
+        total_loss.backward()
         optimizer.step()
 
-        # Logging
+        # 记录和打印损失
         if idx % 50 == 0:
-            print(
-                f"Epoch [{epoch + 1}], Step [{idx}/{len(dataloader)}], BEV Loss: {loss_back_combined.item():.4f}, Depth Loss: {loss_depth.item():.4f} {'*' * 10}")
+            print(f"Epoch [{epoch}], Iter [{idx}], BEV Loss: {loss_total_bev.mean().item():.4f}, "
+                  f"2D Loss: {loss_total_2d.mean().item():.4f}, Offset Loss: {loss_offset.mean().item():.4f}, "
+                  f"Z Loss: {loss_z.mean().item():.4f}, Distillation Loss: {distillation_loss.item():.4f}, "
+                  f"Total Loss: {total_loss.item():.4f}")
 
         if idx % 300 == 0:
             target = gt_seg_data.detach().cpu().numpy().ravel()
@@ -261,51 +142,60 @@ def train_epoch(model, dataloader, optimizer, configs, epoch):
                 zero_division=1
             )
             loss_iter = {
-                "BEV Loss": loss_back_combined.item(),
-                "Offset Loss": loss_offset.item(),
-                "Z Loss": loss_z.item(),
-                "Depth Loss": loss_depth.item(),
-                "F1_BEV_seg": f1_bev_seg
+                "BEV Loss": loss_total_bev.mean().item(),
+                '2D Loss': loss_total_2d.mean().item(),
+                'Offset Loss': loss_offset.mean().item(),
+                'Z Loss': loss_z.mean().item(),
+                "F1_BEV_seg": f1_bev_seg,
+                "Distillation Loss": distillation_loss.item(),
+                "Total Loss": total_loss.item()
             }
-            print(f"Epoch [{epoch + 1}], Step [{idx}], Losses: {loss_iter}")
+            print(f"Epoch [{epoch}], Iter [{idx}], Losses: {loss_iter}")
+
 
 
 def worker_function(config_file, gpu_id, checkpoint_path=None):
-    print('Using GPU IDs:', ','.join([str(i) for i in gpu_id]))
+    print('use gpu ids is '+','.join([str(i) for i in gpu_id]))
     configs = load_config_module(config_file)
 
-    ''' Models and Optimizer '''
+    ''' models and optimizer '''
     model = configs.model()
     model = Combine_Model_and_Loss(model)
-    if torch.cuda.is_available():
-        model = model.cuda()
+    device = torch.device(f'cuda:{gpu_id[0]}' if torch.cuda.is_available() else 'cpu')
+    model = model.to(device)
     model = torch.nn.DataParallel(model, device_ids=gpu_id)
-    optimizer = configs.optimizer(
-        filter(lambda p: p.requires_grad, model.parameters()),
-        **configs.optimizer_params
-    )
+    optimizer = configs.optimizer(filter(lambda p: p.requires_grad, model.parameters()), **configs.optimizer_params)
     scheduler = getattr(configs, "scheduler", CosineAnnealingLR)(optimizer, configs.epochs)
-
     if checkpoint_path:
         if getattr(configs, "load_optimizer", True):
             resume_training(checkpoint_path, model.module, optimizer, scheduler)
         else:
             load_checkpoint(checkpoint_path, model.module, None)
 
-    ''' Dataset '''
+    ''' Initialize teacher model '''
+    teacher_model = initialize_teacher_model(device)
+
+    ''' dataset '''
     Dataset = getattr(configs, "train_dataset", None)
     if Dataset is None:
         Dataset = configs.training_dataset
     train_loader = DataLoader(Dataset(), **configs.loader_args, pin_memory=True)
 
-    ''' Training Loop '''
-    for epoch in range(configs.epochs):
-        print('*' * 100, f"Epoch {epoch + 1}/{configs.epochs}")
-        train_epoch(model, train_loader, optimizer, configs, epoch)
-        scheduler.step()
+    ''' get validation '''
+    # if configs.with_validation:
+    #     val_dataset = Dataset(**configs.val_dataset_args)
+    #     val_loader = DataLoader(val_dataset, **configs.val_loader_args, pin_memory=True)
+    #     val_loss = getattr(configs, "val_loss", loss)
+    #     if eval_only:
+    #         loss_mean = val_dp(model, val_loader, val_loss)
+    #         print(loss_mean)
+    #         return
 
-        # Save model checkpoints
-        save_model_dp(model, optimizer, configs.model_save_path, f'ep{epoch + 1:03d}.pth')
+    for epoch in range(configs.epochs):
+        print('*' * 100, epoch)
+        train_epoch(model, train_loader, optimizer, configs, epoch, teacher_model, device)
+        scheduler.step()
+        save_model_dp(model, optimizer, configs.model_save_path, f'ep{epoch:03d}.pth')
         save_model_dp(model, None, configs.model_save_path, 'latest.pth')
 
 
