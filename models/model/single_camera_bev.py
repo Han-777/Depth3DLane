@@ -3,6 +3,9 @@ import torchvision as tv
 from torch import nn
 from .dpt import DepthAnythingV2, _make_fusion_block, _make_scratch
 import torch.nn.functional as F
+import numpy as np
+import cv2
+from .mrf.process_lanes
 
 class DepthHead(nn.Module):
     def __init__(
@@ -438,4 +441,82 @@ class BEV_LaneDet(nn.Module):  # BEV-LaneDet
             lane_output_2d = self.lane_head_2d(img_s32)
             return lane_output, lane_output_2d, img_s32, img_s64, depth_pred
         else:
-            return self.lane_head(bev), depth_pred
+            # 推理模式，调用处理函数
+            lane_output = self.lane_head(bev)
+            # 调用新添加的处理函数
+            refined_lane_output = self.process_outputs(lane_output, depth_pred, img)
+            # 返回与模型输出同规格的对象
+            return refined_lane_output, depth_pred
+
+    def process_outputs(self, lane_output, depth_pred, img_tensor):
+        """
+        处理模型的输出，执行 MRF 优化，并返回优化后的结果。
+
+        参数：
+        - lane_output: 模型原始车道线输出。
+        - depth_pred: 深度预测图。
+        - img_tensor: 输入的图像张量。
+
+        返回：
+        - refined_lane_output: 优化后的车道线输出，与 lane_output 规格相同。
+        """
+        # 提取深度图
+        depth_map = depth_pred[0, 0].detach().cpu().numpy()
+
+        # 处理分割图
+        ms_new = lane_output[0]
+        segmentation_map = ms_new[0, 0].detach().cpu().numpy()
+        binary_mask = segmentation_map > 0.5  # 根据需要调整阈值
+
+        # 连通域分析
+        binary_mask_uint8 = (binary_mask * 255).astype(np.uint8)
+        num_labels, labels_im = cv2.connectedComponents(binary_mask_uint8)
+
+        # 提取车道线
+        predicted_lanes = []
+        for label in range(1, num_labels):
+            lane_mask = labels_im == label
+            y_coords, x_coords = np.where(lane_mask)
+            lane_points = list(zip(x_coords, y_coords))
+            lane_points.sort(key=lambda point: point[1], reverse=True)
+            predicted_lanes.append(lane_points)
+
+        # 反归一化图像
+        mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1).to(img_tensor.device)
+        std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1).to(img_tensor.device)
+        img_unorm = img_tensor[0] * std + mean
+        image = img_unorm.permute(1, 2, 0).cpu().numpy()
+        image = (image * 255).astype(np.uint8)
+
+        # 使用 MRF 处理车道线
+        refined_lanes = process_lanes(predicted_lanes, depth_map, image)
+
+        # 将优化后的车道线转换回张量形式，生成与原始输出相同规格的对象
+        # 创建新的分割图和嵌入图，与原始输出的尺寸相同
+
+        # 初始化新的分割图和嵌入图
+        H, W = segmentation_map.shape
+        refined_segmentation_map = np.zeros((H, W), dtype=np.float32)
+        refined_embedding_map = np.zeros((2, H, W), dtype=np.float32)
+
+        # 绘制优化后的车道线到新的分割图上
+        for idx, lane in enumerate(refined_lanes):
+            for point in lane:
+                x, y = point
+                if 0 <= x < W and 0 <= y < H:
+                    refined_segmentation_map[y, x] = 1.0
+                    # 为每条车道线赋予不同的嵌入值
+                    refined_embedding_map[:, y, x] = idx
+
+        # 将新的分割图和嵌入图转换为张量
+        refined_segmentation_tensor = torch.from_numpy(refined_segmentation_map).unsqueeze(0).unsqueeze(0).to(ms_new.device)
+        refined_embedding_tensor = torch.from_numpy(refined_embedding_map).unsqueeze(0).to(ms_new.device)
+
+        # 保持其他输出（偏移和深度）不变
+        m_offset_new = lane_output[2]
+        m_z = lane_output[3]
+
+        # 组合成新的 lane_output，规格与原始输出相同
+        refined_lane_output = (refined_segmentation_tensor, refined_embedding_tensor, m_offset_new, m_z)
+
+        return refined_lane_output
