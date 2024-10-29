@@ -14,7 +14,7 @@ from models.util.blocks import FeatureFusionBlock  # Updated import path if nece
 
 
 class BEV_LaneDet(nn.Module):
-    def __init__(self, bev_shape, output_2d_shape, train=True, fusion_type='concat', sequence_height_head = False, temporal_length=1, **depth_distillation_settings):
+    def __init__(self, bev_shape, output_2d_shape, train=True, dpt_path=None, fusion_type='concat', sequence_height_head = False, temporal_length=1, **depth_distillation_settings):
         """
         Initializes the BEV_LaneDet model with configurable feature fusion strategies.
 
@@ -30,6 +30,8 @@ class BEV_LaneDet(nn.Module):
         # Device configuration
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+        self.dpt_path = dpt_path
+        
         # Fusion type parameter
         self.fusion_type = fusion_type.lower()
         assert self.fusion_type in ['concat', 'feature_fusion_block'], \
@@ -96,7 +98,7 @@ class BEV_LaneDet(nn.Module):
                     use_clstoken=False
                 )
                 self.depth_anything.load_state_dict(
-                    torch.load('/mnt/d/github/depth3dlane/models/pretrained/depth_anything_v2_vitl.pth', map_location=self.device)
+                    torch.load(dpt_path, map_location=self.device)
                 )
                 self.depth_anything = self.depth_anything.to(self.device).eval()
 

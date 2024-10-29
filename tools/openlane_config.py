@@ -32,7 +32,7 @@ bev_shape = (
 )
 
 loader_args = dict(
-    batch_size=4,
+    batch_size=8,
     num_workers=12,
     shuffle=True
 )
