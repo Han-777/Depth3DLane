@@ -12,29 +12,16 @@ class FeatureDistillationLoss(nn.Module):
         self.cosine_loss = nn.CosineEmbeddingLoss().to(self.device)
 
     def forward(self, student_features_s32, student_features_s64, teacher_feature_s32, teacher_feature_s64):
-        # Align teacher feature sizes to student feature sizes
-        teacher_feature_s32_aligned = F.interpolate(
-            teacher_feature_s32,
-            size=student_features_s32.shape[2:],
-            mode='bilinear',
-            align_corners=True
-        )
-        teacher_feature_s64_aligned = F.interpolate(
-            teacher_feature_s64,
-            size=student_features_s64.shape[2:],
-            mode='bilinear',
-            align_corners=True
-        )
 
         # Calculate MSE Loss
-        loss_feat_s32_mse = self.mse_loss(student_features_s32, teacher_feature_s32_aligned)
-        loss_feat_s64_mse = self.mse_loss(student_features_s64, teacher_feature_s64_aligned)
+        loss_feat_s32_mse = self.mse_loss(student_features_s32, teacher_feature_s32)
+        loss_feat_s64_mse = self.mse_loss(student_features_s64, teacher_feature_s64)
 
         # Flatten feature maps for cosine similarity loss
         student_s32_flat = student_features_s32.view(student_features_s32.size(0), student_features_s32.size(1), -1)
-        teacher_s32_flat = teacher_feature_s32_aligned.view(teacher_feature_s32_aligned.size(0), teacher_feature_s32_aligned.size(1), -1)
+        teacher_s32_flat = teacher_feature_s32.view(teacher_feature_s32.size(0), teacher_feature_s32.size(1), -1)
         student_s64_flat = student_features_s64.view(student_features_s64.size(0), student_features_s64.size(1), -1)
-        teacher_s64_flat = teacher_feature_s64_aligned.view(teacher_feature_s64_aligned.size(0), teacher_feature_s64_aligned.size(1), -1)
+        teacher_s64_flat = teacher_feature_s64.view(teacher_feature_s64.size(0), teacher_feature_s64.size(1), -1)
 
         # Define separate targets for s32 and s64
         target_s32 = torch.ones(student_s32_flat.size(0) * student_s32_flat.size(2)).to(self.device)

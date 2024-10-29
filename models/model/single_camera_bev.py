@@ -1,4 +1,5 @@
 # single_camera_bev.py
+
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -10,8 +11,10 @@ from .modules.outputHead import LaneHeadResidual_Instance_with_offset_z
 from .modules.auxiliaryHead import LaneHeadResidual_Instance, DepthHeadUNet
 from .modules.depthStudentBranch import StudentS32, StudentS64  # Import the new student models
 from models.util.blocks import FeatureFusionBlock  # Updated import path if necessary
+
+
 class BEV_LaneDet(nn.Module):
-    def __init__(self, bev_shape, output_2d_shape, train=True, fusion_type='concat', sequence_height_head = False, dpt_path=None, temporal_length=1, **depth_distillation_settings):
+    def __init__(self, bev_shape, output_2d_shape, train=True, fusion_type='concat', sequence_height_head = False, temporal_length=1, **depth_distillation_settings):
         """
         Initializes the BEV_LaneDet model with configurable feature fusion strategies.
 
@@ -35,8 +38,6 @@ class BEV_LaneDet(nn.Module):
         # Custom ResNet34 Backbone with Skip Connections
         self.backbone = ResNet34_Backbone(pretrained=True).to(self.device)
 
-        self.dpt_path = dpt_path
-        
         # Spatial Transformers to BEV
         self.down = naive_init_module(
             Residual(
@@ -95,7 +96,7 @@ class BEV_LaneDet(nn.Module):
                     use_clstoken=False
                 )
                 self.depth_anything.load_state_dict(
-                    torch.load(self.dpt_path, map_location=self.device)
+                    torch.load('/mnt/d/github/depth3dlane/models/pretrained/depth_anything_v2_vitl.pth', map_location=self.device)
                 )
                 self.depth_anything = self.depth_anything.to(self.device).eval()
 
@@ -201,18 +202,13 @@ class BEV_LaneDet(nn.Module):
             if self.depth_label_pred or self.depth_feature_pred:
                 # for depth_feature_pred
                 with torch.no_grad():  # with 里面的部分可以做并行计算
-                    # 1. 缩放和填充输入图像以符合 DepthAnythingV2 的要求
-                    resized_img = F.interpolate(img, size=(567, 1008), mode='bilinear', align_corners=False)  # (B, C, 567, 1008)
-
-                    # 填充到 1008x1008
-                    padded_img = F.pad(resized_img, (0, 0, 220, 221), mode='constant', value=0)  # (B, C, 1008, 1008)
+                    resized_img = F.interpolate(img, size=(574, 1022), mode='bilinear', align_corners=False)  # (B, C, 576, 1024) -> (B, C, 574, 1022)
 
                     # 获取 teacher_depth_label 和 teacher_features
-                    teacher_depth_label, teacher_features = self.depth_anything(padded_img)  # teacher_features: List of feature maps
+                    teacher_depth_label, teacher_features = self.depth_anything(resized_img)  # teacher_features: List of feature maps
 
-                    # 移除填充并恢复 teacher_depth_label 尺寸到 (B, 1, 576, 1024)
-                    teacher_depth_label = teacher_depth_label.unsqueeze(1)  # Add a channel dimension (B, 1, H, W)
-                    teacher_depth_label = teacher_depth_label[:, :, 220:787, :]  # 从 (B, 1, 1008, 1008) 裁剪到 (B, 1, 567, 1008)
+                    # Process teacher_depth_label
+                    teacher_depth_label = teacher_depth_label.unsqueeze(1)  # Add a channel dimension (B, 1, 574, 1022)
                     teacher_depth_label = F.interpolate(teacher_depth_label, size=(576, 1024), mode='bilinear', align_corners=True)  # (B, 1, 576, 1024)
 
                     # teacher_depth_label = torch.sigmoid(teacher_depth_label)  # Normalize depth label
@@ -220,13 +216,11 @@ class BEV_LaneDet(nn.Module):
                     # 2. 从 teacher_features 中提取 s32 和 s64 特征
                     teacher_feature_s32 = teacher_features[-2]
                     teacher_feature_s32 = self.channel_reduction(teacher_feature_s32)
-                    # 移除填充对特征图的影响
-                    teacher_feature_s32 = teacher_feature_s32[:, :, 16:-16, :]  # 从 (B, 256, 72, 72) 裁剪到 (B, 256, 40, 72)
+                    teacher_feature_s32 = F.interpolate(teacher_feature_s32, size=(18, 32), mode='bilinear',align_corners=True) # (B, 512, 18, 32)
                     distillation_feature.append(teacher_feature_s32)
 
                     teacher_feature_s64 = teacher_features[-1]
-                    # 移除填充对特征图的影响
-                    teacher_feature_s64 = teacher_feature_s64[:, :, 8:-8, :]  # 从 (B, 512, 36, 36) 裁剪到 (B, 512, 20, 36)
+                    teacher_feature_s64 = F.interpolate(teacher_feature_s64, size=(9, 16), mode='bilinear',align_corners=True) # (B, 1024, 9, 16)
                     distillation_feature.append(teacher_feature_s64)
 
             # for 2d axuliary head

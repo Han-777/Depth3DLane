@@ -16,7 +16,7 @@ from models.loss.depth_combined_loss import CombinedDepthLoss
 from models.loss.feature_distillation_loss import FeatureDistillationLoss
 import matplotlib.pyplot as plt
 import json
-
+from tqdm import tqdm
 
 class LossCalculator(nn.Module):
     def __init__(self, device='cuda'):
@@ -153,8 +153,7 @@ def train_epoch(model, loss_calculator, dataloader, optimizer, configs, epoch, d
     loss_z_list = []
     loss_depth_list = []
     distillation_loss_list = []
-
-    for idx, batch in enumerate(dataloader):
+    for idx, batch in tqdm(enumerate(dataloader), total=len(dataloader), desc="train"):
         # 解包批次数据
         input_data, gt_seg_data, gt_emb_data, offset_y_data, z_data, image_gt_segment, image_gt_instance = batch
 
@@ -227,6 +226,7 @@ def train_epoch(model, loss_calculator, dataloader, optimizer, configs, epoch, d
 
         # 日志记录
         if idx % 50 == 0:
+            print()
             print(
                 f"Epoch [{epoch + 1}], Step [{idx}/{len(dataloader)}], "
                 f"BEV Loss: {loss_total_combined.item():.4f}, "
