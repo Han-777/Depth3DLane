@@ -53,7 +53,7 @@ vc_config['vc_image_shape'] = (1920, 1080)
 
 ''' model '''
 def model():
-    return BEV_LaneDet(bev_shape=bev_shape, output_2d_shape=output_2d_shape,train=True)
+    return BEV_LaneDet(bev_shape=bev_shape, output_2d_shape=output_2d_shape, train=True)
 
 
 ''' optimizer '''

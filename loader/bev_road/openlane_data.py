@@ -7,31 +7,43 @@ import numpy as np
 import torch
 from scipy.interpolate import interp1d
 from torch.utils.data import Dataset
-from utils.coord_util import ego2image,IPM2ego_matrix
+
+from tools.val_apollo import config_file
+from utils.coord_util import ego2image, IPM2ego_matrix
 from utils.standard_camera_cpu import Standard_camera
 
 
 class OpenLane_dataset_with_offset(Dataset):
-    def __init__(self, image_paths, 
-                   depth_image_paths,
-                   gt_paths,
-                   x_range,
-                   y_range, 
-                   meter_per_pixel, 
-                   data_trans,
-                   output_2d_shape,
-                  virtual_camera_config):
+    def __init__(self, image_paths,
+                 gt_paths,
+                 x_range,
+                 y_range,
+                 meter_per_pixel,
+                 data_trans,
+                 output_2d_shape,
+                 virtual_camera_config):
+        """
+        Dataset class for OpenLane dataset with offset and without depth labeling.
 
+        :param image_paths: Paths to input images.
+        :param gt_paths: Paths to ground truth files.
+        :param x_range: Range for x-axis.
+        :param y_range: Range for y-axis.
+        :param meter_per_pixel: Meter per pixel ratio.
+        :param data_trans: Data transformation for images.
+        :param output_2d_shape: Shape of 2D output.
+        :param virtual_camera_config: Configuration for virtual camera settings.
+        """
         self.x_range = x_range
         self.y_range = y_range
         self.meter_per_pixel = meter_per_pixel
         self.image_paths = image_paths
-        self.depth_image_paths = depth_image_paths
         self.gt_paths = gt_paths
         self.cnt_list = []
         self.lane3d_thick = 1
         self.lane2d_thick = 3
         self.lane_length_threshold = 3  #
+
         card_list = os.listdir(self.gt_paths)
         for card in card_list:
             gt_paths = os.path.join(self.gt_paths, card)
@@ -39,13 +51,13 @@ class OpenLane_dataset_with_offset(Dataset):
             for cnt in gt_list:
                 self.cnt_list.append([card, cnt])
 
-        ''' virtual camera paramter'''
+        ''' Virtual camera parameter '''
         self.use_virtual_camera = virtual_camera_config['use_virtual_camera']
         self.vc_intrinsic = virtual_camera_config['vc_intrinsic']
         self.vc_extrinsics = virtual_camera_config['vc_extrinsics']
         self.vc_image_shape = virtual_camera_config['vc_image_shape']
 
-        ''' transform loader '''
+        ''' Transform loader '''
         self.output2d_size = output_2d_shape
         self.trans_image = data_trans
         self.ipm_h, self.ipm_w = int((self.x_range[1] - self.x_range[0]) / self.meter_per_pixel), int(
@@ -53,16 +65,16 @@ class OpenLane_dataset_with_offset(Dataset):
 
     def get_y_offset_and_z(self, res_d):
         '''
-        :param res_d: res_d
-        :param instance_seg:
-        :return:
+        :param res_d: res_d containing lane information.
+        :return: ipm_image, offset_map, z_map
         '''
 
-        def caculate_distance(base_points, lane_points, lane_z, lane_points_set):
+        def calculate_distance(base_points, lane_points, lane_z, lane_points_set):
             '''
-            :param base_points: base_points n * 2
-            :param lane_points:
-            :return:
+            Calculates the distance between points.
+            :param base_points: Base points n * 2
+            :param lane_points: Points along the lane.
+            :return: Offset and z value.
             '''
             condition = np.where(
                 (lane_points_set[0] == int(base_points[0])) & (lane_points_set[1] == int(base_points[1])))
@@ -74,7 +86,6 @@ class OpenLane_dataset_with_offset(Dataset):
             z = np.mean(lane_z_selected[:, 1])
             return offset_y, z
 
-        # instance_seg = np.zeros((450, 120), dtype=np.uint8)
         res_lane_points = {}
         res_lane_points_z = {}
         res_lane_points_bin = {}
@@ -92,8 +103,7 @@ class OpenLane_dataset_with_offset(Dataset):
             if len(x) <= 1:
                 continue
             elif len(x) <= 2:
-                function1 = interp1d(x, y, kind='linear',
-                                     fill_value="extrapolate")  #
+                function1 = interp1d(x, y, kind='linear', fill_value="extrapolate")  #
                 function2 = interp1d(x, z, kind='linear')
             elif len(x) <= 3:
                 function1 = interp1d(x, y, kind='quadratic', fill_value="extrapolate")
@@ -107,8 +117,7 @@ class OpenLane_dataset_with_offset(Dataset):
             res_lane_points[idx] = np.array([base_points, y_points])  #
             res_lane_points_z[idx] = np.array([base_points, z_points])
             res_lane_points_bin[idx] = np.array([base_points_bin, y_points_bin]).astype(np.int64)
-            res_lane_points_set[idx] = np.array([base_points, y_points]).astype(
-                np.int64)
+            res_lane_points_set[idx] = np.array([base_points, y_points]).astype(np.int64)
 
         offset_map = np.zeros((self.ipm_h, self.ipm_w))
         z_map = np.zeros((self.ipm_h, self.ipm_w))
@@ -121,7 +130,7 @@ class OpenLane_dataset_with_offset(Dataset):
                     continue
                 ipm_image[row, col] = idx
                 center = np.array([row, col])
-                offset_y, z = caculate_distance(center, res_lane_points[idx], res_lane_points_z[idx],
+                offset_y, z = calculate_distance(center, res_lane_points[idx], res_lane_points_z[idx],
                                                 res_lane_points_set[idx])  #
                 if offset_y is None:  #
                     ipm_image[row, col] = 0
@@ -136,22 +145,23 @@ class OpenLane_dataset_with_offset(Dataset):
         return ipm_image, offset_map, z_map
 
     def get_seg_offset(self, idx, smooth=False):
+        """
+        Gets the lane segmentation and offset maps for the given index.
+        """
         gt_path = os.path.join(self.gt_paths, self.cnt_list[idx][0], self.cnt_list[idx][1])
         image_path = os.path.join(self.image_paths, self.cnt_list[idx][0], self.cnt_list[idx][1].replace('json', 'jpg'))
-        dep_image_path = os.path.join(self.depth_image_paths, self.cnt_list[idx][0], self.cnt_list[idx][1].replace('json', 'png'))
-        
         image = cv2.imread(image_path)
-        dep_image = cv2.imread(dep_image_path, cv2.IMREAD_GRAYSCALE)
-        
+
         image_h, image_w, _ = image.shape
         with open(gt_path, 'r') as f:
             gt = json.load(f)
+
         cam_w_extrinsics = np.array(gt['extrinsic'])
-        maxtrix_camera2camera_w = np.array([[0, 0, 1, 0],
-                                            [-1, 0, 0, 0],
-                                            [0, -1, 0, 0],
-                                            [0, 0, 0, 1]], dtype=float)
-        cam_extrinsics = cam_w_extrinsics @ maxtrix_camera2camera_w  #
+        matrix_camera2camera_w = np.array([[0, 0, 1, 0],
+                                          [-1, 0, 0, 0],
+                                          [0, -1, 0, 0],
+                                          [0, 0, 0, 1]], dtype=float)
+        cam_extrinsics = cam_w_extrinsics @ matrix_camera2camera_w
         R_vg = np.array([[0, 1, 0],
                          [-1, 0, 0],
                          [0, 0, 1]], dtype=float)
@@ -163,7 +173,7 @@ class OpenLane_dataset_with_offset(Dataset):
             np.matmul(np.linalg.inv(R_vg), cam_extrinsics_persformer[:3, :3]),
             R_vg), R_gc)
         cam_extrinsics_persformer[0:2, 3] = 0.0
-        matrix_lane2persformer = cam_extrinsics_persformer @ np.linalg.inv(maxtrix_camera2camera_w)
+        matrix_lane2persformer = cam_extrinsics_persformer @ np.linalg.inv(matrix_camera2camera_w)
 
         cam_intrinsic = np.array(gt['intrinsic'])
         lanes = gt['lane_lines']
@@ -220,39 +230,33 @@ class OpenLane_dataset_with_offset(Dataset):
 
         ipm_gt, offset_y_map, z_map = self.get_y_offset_and_z(res_points_d)
 
-        ''' virtual camera '''
+        ''' Virtual camera '''
         if self.use_virtual_camera:
             sc = Standard_camera(self.vc_intrinsic, self.vc_extrinsics, self.vc_image_shape,
                                  cam_intrinsic, cam_extrinsics, (image.shape[0], image.shape[1]))
             trans_matrix = sc.get_matrix(height=0)
             image = cv2.warpPerspective(image, trans_matrix, self.vc_image_shape)
             image_gt = cv2.warpPerspective(image_gt, trans_matrix, self.vc_image_shape)
-            dep_image = cv2.warpPerspective(dep_image, trans_matrix, self.vc_image_shape)
-            
-        return image, dep_image, image_gt, ipm_gt, offset_y_map, z_map, cam_extrinsics, cam_intrinsic
+
+        return image, image_gt, ipm_gt, offset_y_map, z_map, cam_extrinsics, cam_intrinsic
 
     def __getitem__(self, idx):
         '''
-        :param idx:
-        :return:
+        :param idx: Index of the sample to be fetched.
+        :return: Various ground truths and input images.
         '''
-        image, dep_image, image_gt, ipm_gt, offset_y_map, z_map, cam_extrinsics, cam_intrinsic = self.get_seg_offset(idx)
-        
+        image, image_gt, ipm_gt, offset_y_map, z_map, cam_extrinsics, cam_intrinsic = self.get_seg_offset(idx)
+
         transformed = self.trans_image(image=image)
         image = transformed["image"]
-        
-        transformed = self.trans_image(image=dep_image)
-        dep_image = transformed["image"]
 
-        combined_image = torch.cat((image, dep_image), dim=0)
-        image = combined_image
-        
-        ''' 2d gt'''
+        ''' 2D ground truth '''
         image_gt = cv2.resize(image_gt, (self.output2d_size[1], self.output2d_size[0]), interpolation=cv2.INTER_NEAREST)
         image_gt_instance = torch.tensor(image_gt).unsqueeze(0)  # h, w, c
         image_gt_segment = torch.clone(image_gt_instance)
         image_gt_segment[image_gt_segment > 0] = 1
-        ''' 3d gt'''
+
+        ''' 3D ground truth '''
         ipm_gt_instance = torch.tensor(ipm_gt).unsqueeze(0)  # h, w, c0
         ipm_gt_offset = torch.tensor(offset_y_map).unsqueeze(0)
         ipm_gt_z = torch.tensor(z_map).unsqueeze(0)
@@ -266,15 +270,14 @@ class OpenLane_dataset_with_offset(Dataset):
 
 
 class OpenLane_dataset_with_offset_val(Dataset):
-    def __init__(self, image_paths, depth_val_image_path,
+    def __init__(self, image_paths,
                  gt_paths,
                  data_trans,
                  virtual_camera_config):
-        self.dep_paths = depth_val_image_path
         self.image_paths = image_paths
         self.gt_paths = gt_paths
 
-        ''' get all list '''
+        ''' Get all list '''
         self.cnt_list = []
         card_list = os.listdir(self.gt_paths)
         for card in card_list:
@@ -283,63 +286,52 @@ class OpenLane_dataset_with_offset_val(Dataset):
             for cnt in gt_list:
                 self.cnt_list.append([card, cnt])
 
-        ''' virtual camera paramter'''
+        ''' Virtual camera parameter '''
         self.use_virtual_camera = virtual_camera_config['use_virtual_camera']
         self.vc_intrinsic = virtual_camera_config['vc_intrinsic']
         self.vc_extrinsics = virtual_camera_config['vc_extrinsics']
         self.vc_image_shape = virtual_camera_config['vc_image_shape']
 
-        ''' transform loader '''
+        ''' Transform loader '''
         self.trans_image = data_trans
 
-
     def __getitem__(self, idx):
-        '''get image '''
+        ''' Get image '''
         gt_path = os.path.join(self.gt_paths, self.cnt_list[idx][0], self.cnt_list[idx][1])
         image_path = os.path.join(self.image_paths, self.cnt_list[idx][0], self.cnt_list[idx][1].replace('json', 'jpg'))
-        dep_path = os.path.join(self.dep_paths, self.cnt_list[idx][0], self.cnt_list[idx][1].replace('json', 'png'))
-        
+
         image = cv2.imread(image_path)
         with open(gt_path, 'r') as f:
             gt = json.load(f)
         cam_w_extrinsics = np.array(gt['extrinsic'])  #
-        maxtrix_camera2camera_w = np.array([[0, 0, 1, 0],
-                                            [-1, 0, 0, 0],
-                                            [0, -1, 0, 0],
-                                            [0, 0, 0, 1]], dtype=float)
-        cam_extrinsics = cam_w_extrinsics @ maxtrix_camera2camera_w
+        matrix_camera2camera_w = np.array([[0, 0, 1, 0],
+                                          [-1, 0, 0, 0],
+                                          [0, -1, 0, 0],
+                                          [0, 0, 0, 1]], dtype=float)
+        cam_extrinsics = cam_w_extrinsics @ matrix_camera2camera_w
 
         cam_intrinsic = np.array(gt['intrinsic'])
-
-        depth_img = cv2.imread(dep_path, cv2.IMREAD_GRAYSCALE)
 
         if self.use_virtual_camera:
             sc = Standard_camera(self.vc_intrinsic, self.vc_extrinsics, self.vc_image_shape,
                                  cam_intrinsic, cam_extrinsics, (image.shape[0], image.shape[1]))
             trans_matrix = sc.get_matrix(height=0)
             image = cv2.warpPerspective(image, trans_matrix, self.vc_image_shape)
-            depth_img = cv2.warpPerspective(depth_img, trans_matrix, self.vc_image_shape)
-
 
         transformed = self.trans_image(image=image)
         image = transformed["image"]
-        
-        transformed = self.trans_image(image=depth_img)
-        depth_img = transformed['image']
-        
-        image = torch.cat((image, depth_img), dim=0)
-        
+
         return image, self.cnt_list[idx]
 
     def __len__(self):
         return len(self.cnt_list)
 
 
-if __name__ == "__main__":
-    ''' parameter from config '''
-    from utils.config_util import load_config_module
-    config_file = '/mnt/ve_perception/wangruihao/code/BEV-LaneDet/tools/openlane_config.py'
-    configs = load_config_module(config_file)
-    dataset = configs.val_dataset()
-    for item in dataset:
-        continue
+# if __name__ == "__main__":
+#     ''' parameter from config '''
+#     from utils.config_util import load_config_module
+#     config_file = '/mnt/d/github/Depth3DLane/tools/openlane_config.py'
+#     configs = load_config_module(config_file)
+#     dataset = configs.val_dataset()
+#     for item in dataset:
+#         continue

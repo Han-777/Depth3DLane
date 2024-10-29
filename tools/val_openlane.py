@@ -2,7 +2,7 @@ import numpy as np
 import copy
 import time
 import sys
-sys.path.append('/media/bluewolf/Data/bluewolf/projs/Depth3DLane')
+sys.path.append('/media/bluewolf/Data/bluewolf/projs/depth_label/Depth3DLane')
 import os
 gpu_id = [0]
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -19,7 +19,7 @@ from models.util.post_process import bev_instance2points_with_offset_z
 from utils.util_val.val_offical import LaneEval
 from models.model.single_camera_bev import *
 
-model_path = '../results/openlane/ep019.pth' #model path of verification
+model_path = '../results/openlane/ep050.pth' #model path of verification
 
 ''' parameter from config '''
 config_file = './openlane_config.py'
