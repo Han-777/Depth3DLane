@@ -1,5 +1,4 @@
 # single_camera_bev.py
-
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -11,10 +10,8 @@ from .modules.outputHead import LaneHeadResidual_Instance_with_offset_z
 from .modules.auxiliaryHead import LaneHeadResidual_Instance, DepthHeadUNet
 from .modules.depthStudentBranch import StudentS32, StudentS64  # Import the new student models
 from models.util.blocks import FeatureFusionBlock  # Updated import path if necessary
-
-
 class BEV_LaneDet(nn.Module):
-    def __init__(self, bev_shape, output_2d_shape, train=True, fusion_type='concat', sequence_height_head = False, temporal_length=1, **depth_distillation_settings):
+    def __init__(self, bev_shape, output_2d_shape, train=True, fusion_type='concat', sequence_height_head = False, dpt_path=None, temporal_length=1, **depth_distillation_settings):
         """
         Initializes the BEV_LaneDet model with configurable feature fusion strategies.
 
@@ -38,6 +35,8 @@ class BEV_LaneDet(nn.Module):
         # Custom ResNet34 Backbone with Skip Connections
         self.backbone = ResNet34_Backbone(pretrained=True).to(self.device)
 
+        self.dpt_path = dpt_path
+        
         # Spatial Transformers to BEV
         self.down = naive_init_module(
             Residual(
@@ -96,7 +95,7 @@ class BEV_LaneDet(nn.Module):
                     use_clstoken=False
                 )
                 self.depth_anything.load_state_dict(
-                    torch.load('/mnt/d/github/depth3dlane/models/pretrained/depth_anything_v2_vitl.pth', map_location=self.device)
+                    torch.load(self.dpt_path, map_location=self.device)
                 )
                 self.depth_anything = self.depth_anything.to(self.device).eval()
 

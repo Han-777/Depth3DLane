@@ -16,6 +16,7 @@ venv/
 
 # Logs and debug output
 *.log
+todo.md
 
 # Large data files
 *.pth
