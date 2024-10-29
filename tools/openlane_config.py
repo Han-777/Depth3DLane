@@ -1,4 +1,3 @@
-import os
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from torch.optim import AdamW
@@ -6,21 +5,32 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 import numpy as np
 from loader.bev_road.openlane_data import OpenLane_dataset_with_offset, OpenLane_dataset_with_offset_val
 from models.model.single_camera_bev import BEV_LaneDet
+import os
 
-base_dir = "/media/bluewolf/Data/bluewolf/projs/distillation/Depth3DLane"
+data_base_dir = "/media/bluewolf/Data/bluewolf/projs/Depth3DLane"
+
 ''' data split '''
-train_gt_paths = os.path.join(base_dir, 'data/lane3d_1000/training')
-train_image_paths = os.path.join(base_dir, 'data/images/training')
 
-val_gt_paths = os.path.join(base_dir, 'data/lane3d_1000/validation')
-val_image_paths = os.path.join(base_dir, 'data/images/validation')
+# train_gt_paths = os.path.join(data_base_dir, 'data/lane3d_1000/training')
+# train_image_paths = os.path.join(data_base_dir, 'data/images/training')
+# depth_image_paths = os.path.join(data_base_dir, 'data/images(depth)/training')
+#
+# val_gt_paths = os.path.join(data_base_dir, 'data/lane3d_1000/validation')
+# val_image_paths = os.path.join(data_base_dir, 'data/images/validation')
+# depth_val_image_path = os.path.join(data_base_dir, 'data/images(depth)/validation')
+#
+# model_save_path = "/mnt/d/github/3D-Lane-Detection/dataset/OpenLane/results/openlane"
 
-model_save_path = os.path.join(base_dir, 'results/openlane')
+train_gt_paths = '/mnt/d/github/3D-Lane-Detection/dataset/OpenLane/lane3d_1000/training'
+train_image_paths = '/mnt/d/github/3D-Lane-Detection/dataset/OpenLane/images/training'
+
+val_gt_paths = '/mnt/d/github/3D-Lane-Detection/dataset/OpenLane/lane3d_1000/validation'
+val_image_paths = '/mnt/d/github/3D-Lane-Detection/dataset/OpenLane/images/validation'
+
+model_save_path = "/mnt/d/github/3D-Lane-Detection/dataset/OpenLane/results/openlane"
 
 input_shape = (576, 1024)
 output_2d_shape = (144, 256)
-
-dpt_path = os.path.join(base_dir, r"models/pretrained/depth_anything_v2_vitl.pth")
 
 ''' BEV Range Configuration '''
 x_range = (3, 103)
@@ -32,7 +42,7 @@ bev_shape = (
 )
 
 loader_args = dict(
-    batch_size=8,
+    batch_size=1,
     num_workers=12,
     shuffle=True
 )
@@ -63,7 +73,6 @@ def model():
         train=True,
         sequence_height_head=False,
         temporal_length=4,
-        dpt_path=dpt_path,
         fusion_type=fusion_type,
         response_distillation=False,    # Set to True if response distillation is needed
         feature_distillation=True      # Enable feature distillation

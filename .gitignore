@@ -1,5 +1,4 @@
 # Python cache files
-**/__pycache__
 __pycache__/
 *.py[cod]
 *.so
@@ -16,10 +15,10 @@ venv/
 
 # Logs and debug output
 *.log
-todo.md
 
 # Large data files
 *.pth
 data/
 results/
 checkpoints/
+pretrained/
