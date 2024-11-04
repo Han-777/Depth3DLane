@@ -1,6 +1,14 @@
 # train_openlane.py
 
 import sys
+import os
+
+# Add the directory containing the 'models' module to the system path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+# Print the system path for debugging
+print("System path:", sys.path)
+
 import torch
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
@@ -11,14 +19,13 @@ from models.loss import IoULoss, NDPushPullLoss
 from utils.config_util import load_config_module
 from sklearn.metrics import f1_score
 import numpy as np
-import os
 from models.loss.depth_combined_loss import CombinedDepthLoss
 from models.loss.feature_distillation_loss import FeatureDistillationLoss
 import matplotlib.pyplot as plt  # Added for plotting
 
 
 class LossCalculator(nn.Module):
-    def __init__(self, device='cuda'):
+    def __init__(self, device="cuda"):
         super(LossCalculator, self).__init__()
         self.device = device
 
@@ -30,7 +37,9 @@ class LossCalculator(nn.Module):
         self.bce_loss = nn.BCELoss().to(self.device)
 
         # Combined depth loss
-        self.combined_depth_loss = CombinedDepthLoss(alpha=0.5, beta=0.3, gamma=0.2).to(self.device)
+        self.combined_depth_loss = CombinedDepthLoss(alpha=0.5, beta=0.3, gamma=0.2).to(
+            self.device
+        )
 
         # Depth Feature distillation loss
         self.depth_feature_distillation_loss = FeatureDistillationLoss().to(self.device)
@@ -51,57 +60,78 @@ class LossCalculator(nn.Module):
             return {}
 
         # Unpack outputs
-        lane_outputs = outputs['lane_outputs']  # (pred, emb, offset_y, z)
-        lane_2d_outputs = outputs['lane_2d_outputs']  # (pred_2d, emb_2d)
-        depth_map = outputs.get('depth_map', None)  # (B, 1, H, W) or None
-        teacher_depth_label = outputs.get('teacher_depth_label', None)  # Teacher's depth labels
-        distillation_feature = outputs.get('distillation_feature', None)  # Teacher's features
+        lane_outputs = outputs["lane_outputs"]  # (pred, emb, offset_y, z)
+        lane_2d_outputs = outputs["lane_2d_outputs"]  # (pred_2d, emb_2d)
+        depth_map = outputs.get("depth_map", None)  # (B, 1, H, W) or None
+        teacher_depth_label = outputs.get(
+            "teacher_depth_label", None
+        )  # Teacher's depth labels
+        distillation_feature = outputs.get(
+            "distillation_feature", None
+        )  # Teacher's features
 
         pred, emb, offset_y, z = lane_outputs
         pred_2d, emb_2d = lane_2d_outputs
 
         # 3D Losses
         # Segmentation Loss
-        loss_seg = self.bce(pred, gt['gt_seg']) + self.iou_loss(torch.sigmoid(pred), gt['gt_seg'])
+        loss_seg = self.bce(pred, gt["gt_seg"]) + self.iou_loss(
+            torch.sigmoid(pred), gt["gt_seg"]
+        )
 
         # Embedding Loss
-        loss_emb = self.poopoo(emb, gt['gt_instance'])
+        loss_emb = self.poopoo(emb, gt["gt_instance"])
 
         # Offset Loss
-        loss_offset = self.bce_loss(torch.sigmoid(offset_y) * gt['gt_seg'], gt['gt_offset_y'])
+        loss_offset = self.bce_loss(
+            torch.sigmoid(offset_y) * gt["gt_seg"], gt["gt_offset_y"]
+        )
 
         # Height Loss
-        loss_z = self.mse_loss(torch.sigmoid(z) * gt['gt_seg'], gt['gt_z'])
+        loss_z = self.mse_loss(torch.sigmoid(z) * gt["gt_seg"], gt["gt_z"])
 
         # Combined BEV Loss
         loss_total = 3.0 * loss_seg + 0.5 * loss_emb
 
         # 2D Losses
         # 2D Segmentation Loss
-        loss_seg_2d = self.bce(pred_2d, gt['image_gt_segment']) + self.iou_loss(torch.sigmoid(pred_2d),
-                                                                                gt['image_gt_segment'])
+        loss_seg_2d = self.bce(pred_2d, gt["image_gt_segment"]) + self.iou_loss(
+            torch.sigmoid(pred_2d), gt["image_gt_segment"]
+        )
 
         # 2D Embedding Loss
-        loss_emb_2d = self.poopoo(emb_2d, gt['image_gt_instance'])
+        loss_emb_2d = self.poopoo(emb_2d, gt["image_gt_instance"])
 
         # Combined 2D Loss
         loss_total_2d = 3.0 * loss_seg_2d + 0.5 * loss_emb_2d
 
         # Depth Loss
-        loss_depth = self.combined_depth_loss(depth_map, teacher_depth_label) if depth_map is not None else 0.0
+        loss_depth = (
+            self.combined_depth_loss(depth_map, teacher_depth_label)
+            if depth_map is not None
+            else 0.0
+        )
 
         # Distillation Loss
-        distillation_loss = self.depth_feature_distillation_loss(distillation_feature[0], distillation_feature[1],
-                                                                 distillation_feature[2], distillation_feature[3]) if distillation_feature is not None else 0.0
+        distillation_loss = (
+            self.depth_feature_distillation_loss(
+                distillation_feature[0],
+                distillation_feature[1],
+                distillation_feature[2],
+                distillation_feature[3],
+            )
+            if distillation_feature is not None
+            else 0.0
+        )
 
         # Total combined loss
         loss_total_combined = (
-                loss_total +
-                0.5 * loss_total_2d +
-                60 * loss_offset +
-                30 * loss_z +
-                loss_depth +
-                distillation_loss
+            loss_total
+            + 0.5 * loss_total_2d
+            + 60 * loss_offset
+            + 30 * loss_z
+            + loss_depth
+            + distillation_loss
         )
 
         # Aggregate all losses
@@ -146,7 +176,15 @@ def train_epoch(model, loss_calculator, dataloader, optimizer, configs, epoch, d
 
     for idx, batch in enumerate(dataloader):
         # Unpack batch
-        input_data, gt_seg_data, gt_emb_data, offset_y_data, z_data, image_gt_segment, image_gt_instance = batch
+        (
+            input_data,
+            gt_seg_data,
+            gt_emb_data,
+            offset_y_data,
+            z_data,
+            image_gt_segment,
+            image_gt_instance,
+        ) = batch
 
         # Move data to device
         input_data = input_data.to(device)
@@ -159,12 +197,12 @@ def train_epoch(model, loss_calculator, dataloader, optimizer, configs, epoch, d
 
         # Prepare ground truth dictionary
         gt = {
-            'gt_seg': gt_seg_data,
-            'gt_instance': gt_emb_data,
-            'gt_offset_y': offset_y_data,
-            'gt_z': z_data,
-            'image_gt_segment': image_gt_segment,
-            'image_gt_instance': image_gt_instance,
+            "gt_seg": gt_seg_data,
+            "gt_instance": gt_emb_data,
+            "gt_offset_y": offset_y_data,
+            "gt_z": z_data,
+            "image_gt_segment": image_gt_segment,
+            "image_gt_instance": image_gt_instance,
         }
 
         # Forward pass through the model
@@ -194,9 +232,14 @@ def train_epoch(model, loss_calculator, dataloader, optimizer, configs, epoch, d
         total_loss_total_2d += loss_total_2d.item()
         total_loss_offset += loss_offset.item()
         total_loss_z += loss_z.item()
-        total_loss_depth += loss_depth.item() if isinstance(loss_depth, torch.Tensor) else loss_depth
-        total_distillation_loss += distillation_loss.item() if isinstance(distillation_loss,
-                                                                          torch.Tensor) else distillation_loss
+        total_loss_depth += (
+            loss_depth.item() if isinstance(loss_depth, torch.Tensor) else loss_depth
+        )
+        total_distillation_loss += (
+            distillation_loss.item()
+            if isinstance(distillation_loss, torch.Tensor)
+            else distillation_loss
+        )
         num_batches += 1
 
         # Logging
@@ -211,8 +254,14 @@ def train_epoch(model, loss_calculator, dataloader, optimizer, configs, epoch, d
         if idx % 300 == 0:
             # Calculate F1 Score for BEV segmentation
             with torch.no_grad():
-                target = gt['gt_seg'].detach().cpu().numpy().ravel()
-                pred_prob = torch.sigmoid(outputs['lane_outputs'][0]).detach().cpu().numpy().ravel()
+                target = gt["gt_seg"].detach().cpu().numpy().ravel()
+                pred_prob = (
+                    torch.sigmoid(outputs["lane_outputs"][0])
+                    .detach()
+                    .cpu()
+                    .numpy()
+                    .ravel()
+                )
                 pred_label = (pred_prob > 0.5).astype(np.int64)
                 target_label = (target > 0.5).astype(np.int64)
                 f1_bev_seg = f1_score(target_label, pred_label, zero_division=1)
@@ -221,9 +270,17 @@ def train_epoch(model, loss_calculator, dataloader, optimizer, configs, epoch, d
                 "BEV Loss": loss_total_combined.item(),
                 "Offset Loss": loss_offset.item(),
                 "Z Loss": loss_z.item(),
-                "Depth Loss": loss_depth.item() if isinstance(loss_depth, torch.Tensor) else loss_depth,
-                "Distillation Loss": distillation_loss.item() if isinstance(distillation_loss, torch.Tensor) else distillation_loss,
-                "F1_BEV_seg": f1_bev_seg
+                "Depth Loss": (
+                    loss_depth.item()
+                    if isinstance(loss_depth, torch.Tensor)
+                    else loss_depth
+                ),
+                "Distillation Loss": (
+                    distillation_loss.item()
+                    if isinstance(distillation_loss, torch.Tensor)
+                    else distillation_loss
+                ),
+                "F1_BEV_seg": f1_bev_seg,
             }
             print(f"Epoch [{epoch + 1}], Step [{idx}], Losses: {loss_iter}")
 
@@ -245,38 +302,47 @@ class WorkerFunction:
         self.config_file = config_file
         self.gpu_id = gpu_id
         self.checkpoint_path = checkpoint_path
-        self.device = torch.device(f"cuda:{gpu_id[0]}" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device(
+            f"cuda:{gpu_id[0]}" if torch.cuda.is_available() else "cpu"
+        )
         self.configs = load_config_module(config_file)
 
-        ''' Initialize Model '''
+        """ Initialize Model """
         self.model = self.configs.model().to(self.device)
         if torch.cuda.device_count() > 1:
             self.model = nn.DataParallel(self.model, device_ids=gpu_id)
 
-        ''' Initialize Loss Calculator '''
+        """ Initialize Loss Calculator """
         self.loss_calculator = LossCalculator(device=self.device)
 
-        ''' Initialize Optimizer and Scheduler '''
+        """ Initialize Optimizer and Scheduler """
         self.optimizer = self.configs.optimizer(
             filter(lambda p: p.requires_grad, self.model.parameters()),
-            **self.configs.optimizer_params
+            **self.configs.optimizer_params,
         )
         self.scheduler = CosineAnnealingLR(self.optimizer, T_max=self.configs.epochs)
 
-        ''' Load Checkpoint if Provided '''
+        """ Load Checkpoint if Provided """
         if self.checkpoint_path:
             if getattr(self.configs, "load_optimizer", True):
-                resume_training(self.checkpoint_path, self.model.module, self.optimizer, self.scheduler)
+                resume_training(
+                    self.checkpoint_path,
+                    self.model.module,
+                    self.optimizer,
+                    self.scheduler,
+                )
             else:
                 load_checkpoint(self.checkpoint_path, self.model.module, None)
 
-        ''' Initialize Dataset and DataLoader '''
+        """ Initialize Dataset and DataLoader """
         Dataset = getattr(self.configs, "train_dataset", None)
         if Dataset is None:
             Dataset = self.configs.train_dataset
-        self.train_loader = DataLoader(Dataset(), **self.configs.loader_args, pin_memory=True)
+        self.train_loader = DataLoader(
+            Dataset(), **self.configs.loader_args, pin_memory=True
+        )
 
-        ''' Initialize Loss History for Plotting '''
+        """ Initialize Loss History for Plotting """
         self.loss_history = {
             "loss_total_combined": [],
             "loss_total_2d": [],
@@ -286,14 +352,16 @@ class WorkerFunction:
             "distillation_loss": [],
         }
 
-        ''' Initialize Plot Directory '''
-        self.plot_dir = os.path.join(self.configs.model_save_path, 'loss_plots')
-        os.makedirs(self.plot_dir, exist_ok=True)  # Create directory if it doesn't exist
+        """ Initialize Plot Directory """
+        self.plot_dir = os.path.join(self.configs.model_save_path, "loss_plots")
+        os.makedirs(
+            self.plot_dir, exist_ok=True
+        )  # Create directory if it doesn't exist
 
     def train(self):
-        ''' Training Loop '''
+        """Training Loop"""
         for epoch in range(self.configs.epochs):
-            print('*' * 100, f"Epoch {epoch + 1}/{self.configs.epochs}")
+            print("*" * 100, f"Epoch {epoch + 1}/{self.configs.epochs}")
             avg_losses = train_epoch(
                 model=self.model,
                 loss_calculator=self.loss_calculator,
@@ -301,7 +369,7 @@ class WorkerFunction:
                 optimizer=self.optimizer,
                 configs=self.configs,
                 epoch=epoch,
-                device=self.device
+                device=self.device,
             )
             self.scheduler.step()
 
@@ -313,8 +381,13 @@ class WorkerFunction:
             self.plot_losses(epoch + 1)
 
             # Save model checkpoints
-            save_model_dp(self.model, self.optimizer, self.configs.model_save_path, f'ep{epoch + 1:03d}.pth')
-            save_model_dp(self.model, None, self.configs.model_save_path, 'latest.pth')
+            save_model_dp(
+                self.model,
+                self.optimizer,
+                self.configs.model_save_path,
+                f"ep{epoch + 1:03d}.pth",
+            )
+            save_model_dp(self.model, None, self.configs.model_save_path, "latest.pth")
 
     def plot_losses(self, epoch):
         """
@@ -326,15 +399,15 @@ class WorkerFunction:
         plt.figure(figsize=(10, 6))
         for loss_name, loss_values in self.loss_history.items():
             plt.plot(range(1, epoch + 1), loss_values, label=loss_name)
-        plt.xlabel('Epoch')
-        plt.ylabel('Loss')
-        plt.title('Training Loss Curves')
+        plt.xlabel("Epoch")
+        plt.ylabel("Loss")
+        plt.title("Training Loss Curves")
         plt.legend()
         plt.grid(True)
         plt.tight_layout()
 
         # Save the plot
-        plot_path = os.path.join(self.plot_dir, f'loss_epoch_{epoch}.png')
+        plot_path = os.path.join(self.plot_dir, f"loss_epoch_{epoch}.png")
         plt.savefig(plot_path)
         plt.close()
         print(f"Saved loss plot for epoch {epoch} at {plot_path}")
@@ -349,15 +422,13 @@ def worker_function(config_file, gpu_id, checkpoint_path=None):
         gpu_id (list): List of GPU IDs to use.
         checkpoint_path (str, optional): Path to a checkpoint to resume training from.
     """
-    print('Using GPU IDs:', ','.join([str(i) for i in gpu_id]))
+    print("Using GPU IDs:", ",".join([str(i) for i in gpu_id]))
     trainer = WorkerFunction(config_file, gpu_id, checkpoint_path)
     trainer.train()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     import warnings
 
     warnings.filterwarnings("ignore")
-    worker_function('./openlane_config.py', gpu_id=[0])
-
-
+    worker_function("./openlane_config.py", gpu_id=[0])
